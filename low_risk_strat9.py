@@ -5,7 +5,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 import plotly.express as px
 import plotly.graph_objects as go
-from tradingview_datafeed import TradingViewDatafeed, Interval  # Updated import
+from tradingview-datafeed import TradingViewDatafeed, Interval  # Updated import
 from datetime import datetime, timedelta
 import time
 
