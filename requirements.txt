@@ -1,5 +1,6 @@
-streamlit
-matplotlib
-tradingview-datafeed==2.1.1
-scikit-learn
-plotly
+tvdatafeed==2.1.0
+streamlit==1.28.1
+pandas==2.0.3
+numpy==1.24.3
+scikit-learn==1.3.0
+plotly==5.18.0

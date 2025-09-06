@@ -5,7 +5,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 import plotly.express as px
 import plotly.graph_objects as go
-from tradingview_datafeed import TradingViewDatafeed, Interval  # Updated import
+from tvDatafeed import TvDatafeed, Interval
 from datetime import datetime, timedelta
 import time
 
@@ -29,37 +29,37 @@ def calculate_rolling_correlations(pca_df, window=50):
 
 def calculate_correlation_regimes(corr_data):
     """Identify historical correlation regimes"""
-    regimes = {}
-    
-    # Define pairs of components to analyze
-    pairs = [('PC1', 'PC2'), ('PC2', 'PC3'), ('PC1', 'PC3')]
-    
-    for pc1, pc2 in pairs:
-        col = f"{pc1}-{pc2}"
+    regimes = []
+    for pair in [('PC1', 'PC2'), ('PC2', 'PC3'), ('PC1', 'PC3')]:
+        col = f"{pair[0]}-{pair[1]}"
         rolling_mean = corr_data[col].rolling(90).mean()
         
-        # Define regimes with clearer logic
-        regime_conditions = [
-            (rolling_mean > 0.6, f"Strong Positive {col}"),
-            (rolling_mean > 0.3, f"Positive {col}"),
-            (rolling_mean > -0.3, f"Neutral {col}"),
-            (rolling_mean > -0.6, f"Negative {col}"),
-            (rolling_mean <= -0.6, f"Strong Negative {col}")
+        # Define regimes
+        conditions = [
+            (rolling_mean > 0.6),
+            (rolling_mean > 0.3),
+            (rolling_mean > -0.3),
+            (rolling_mean > -0.6),
+            (rolling_mean <= -0.6)
+        ]
+        choices = [
+            f"Strong Positive {col}",
+            f"Positive {col}",
+            f"Neutral {col}",
+            f"Negative {col}",
+            f"Strong Negative {col}"
         ]
         
-        # Build regime series
-        regime = pd.Series('Other', index=corr_data.index)
-        for condition, label in regime_conditions:
-            regime = regime.where(~condition, label)
-        
-        regimes[f"{col}_regime"] = regime
+        # Remove dtype parameter from np.select
+        regime = pd.Series(np.select(conditions, choices, default='Other'), index=corr_data.index)
+        regimes.append(pd.DataFrame({f"{col}_regime": regime}))
     
-    return pd.DataFrame(regimes)
+    return pd.concat(regimes, axis=1)
 
 # --- Enhanced Data Fetching ---
 @st.cache_data(ttl=3600, show_spinner="Fetching live market data...")
 def fetch_data(shift_audjpy=True):
-    tv = TradingViewDatafeed()  # Updated class name
+    tv = TvDatafeed()
     assets = {
         'AMEX': ['gld', 'kweb', 'uso', 'bito', 'uup'],
         'NASDAQ': ['qqq', 'ief'],
@@ -85,7 +85,7 @@ def fetch_data(shift_audjpy=True):
                     if not data.empty:
                         df = data[['close']].copy()
                         df.columns = [f"{exchange.lower()}:{symbol}"]
-                        raw_dfs.append(df)  # Fixed: removed duplicate line
+                        raw_dfs.append(df)
                     break
                 except Exception as e:
                     if attempt == max_retries - 1:
@@ -95,6 +95,7 @@ def fetch_data(shift_audjpy=True):
     
     try:
         # 2. Initial merge (keep all data)
+    # In the fetch_data() function, ensure this part exists:
         vix_df = next((df for df in raw_dfs if 'tvc:vix' in df.columns), None)
         other_dfs = [df for df in raw_dfs if 'tvc:vix' not in df.columns]
         merged_df = pd.concat(other_dfs, axis=1)
@@ -109,16 +110,18 @@ def fetch_data(shift_audjpy=True):
                 direction='nearest',
                 tolerance=pd.Timedelta('2h')
             )
-
-        # Apply transformations and filtering
+        
+        # 4. Convert to Singapore time
+        #merged_df.index = merged_df.index.tz_localize('UTC').tz_convert('Asia/Singapore')
+        
+        # 5. Apply transformations
         if 'amex:uup' in merged_df.columns:
             merged_df['amex:uup'] = 1 / merged_df['amex:uup']
         
         if shift_audjpy and 'oanda:audjpy' in merged_df.columns:
             merged_df['oanda:audjpy'] = merged_df['oanda:audjpy'].shift(1)
             merged_df['tvc:vix'] = merged_df['tvc:vix'].shift(1)
-
-        # Filter to target hours
+        # 6. Filter to target hours (21:30 and 05:30 SGT windows)
         def is_target_time(ts):
             hour, minute = ts.hour, ts.minute
             return ((19 <= hour <= 23 and minute <= 55) or  # 21:00-22:30 window
@@ -126,16 +129,31 @@ def fetch_data(shift_audjpy=True):
         
         target_mask = merged_df.index.map(is_target_time)
         filtered_df = merged_df[target_mask].copy()
-
+        
+        # 7. Clean column names
+        filtered_df.columns = [col.split(':')[1] for col in filtered_df.columns]
+        
+        # ===== DEBUG OUTPUT =====
+        st.write("## Before DropNA (Last 400 Rows)")
+        st.write(filtered_df.tail(400))
+        st.write("Missing values before dropna():")
+        st.write(filtered_df.isna().sum())
+        
         # 8. Final clean-up
         final_df = filtered_df.dropna()
+        
+        st.write("## After DropNA (Last 400 Rows)")
+        st.write(final_df.tail(400))
+        st.write("Missing values after dropna():")
+        st.write(final_df.isna().sum())
+        st.write(f"Final shape: {final_df.shape}")
         
         return final_df
     
     except Exception as e:
         st.error(f"Error processing data: {str(e)}")
         return pd.DataFrame()
-
+    
 # --- Enhanced PCA Analysis ---
 @st.cache_data(ttl=1800, show_spinner="Running PCA analysis...")
 def rolling_pca(df, window=125):
@@ -159,26 +177,28 @@ def rolling_pca(df, window=125):
         pca = PCA(n_components=3)
         transformed = pca.fit_transform(scaled_data)
         
-        # Enforce sign convention
-        bond_col = 'amex:ief' if 'amex:ief' in df.columns else next((c for c in df.columns if 'bond' in c.lower() or 'ief' in c), None)
-        risk_col = 'nasdaq:qqq' if 'nasdaq:qqq' in df.columns else next((c for c in df.columns if 'qqq' in c or 'spy' in c.lower()), None)
-        usd_col = 'amex:uup' if 'amex:uup' in df.columns else next((c for c in df.columns if 'uup' in c or 'dxy' in c.lower()), None)
+        # ===== NEW: Enforce sign convention =====
+        # Identify key variables (adjust column names as needed)
+        bond_col = 'ief' if 'ief' in df.columns else next((c for c in df.columns if 'bond' in c.lower()), None)
+        risk_col = 'qqq' if 'qqq' in df.columns else next((c for c in df.columns if 'spy' in c.lower()), None)
+        usd_col = 'uup' if 'uup' in df.columns else next((c for c in df.columns if 'dxy' in c.lower()), None)
         
         # Flip PC2 if bonds load negatively
-        if bond_col and bond_col in df.columns and pca.components_[1, df.columns.get_loc(bond_col)] < 0:
+        if bond_col and pca.components_[1, df.columns.get_loc(bond_col)] < 0:
             transformed[:, 1] *= -1
             pca.components_[1, :] *= -1
         
         # Flip PC1 if risk asset loads negatively
-        if risk_col and risk_col in df.columns and pca.components_[0, df.columns.get_loc(risk_col)] < 0:
+        if risk_col and pca.components_[0, df.columns.get_loc(risk_col)] < 0:
             transformed[:, 0] *= -1
             pca.components_[0, :] *= -1
         
         # Flip PC3 if USD loads negatively
-        if usd_col and usd_col in df.columns and pca.components_[2, df.columns.get_loc(usd_col)] < 0:
+        if usd_col and pca.components_[2, df.columns.get_loc(usd_col)] < 0:
             transformed[:, 2] *= -1
             pca.components_[2, :] *= -1
-
+        # ===== END NEW CODE =====
+        
         reconstruction = np.dot(transformed, pca.components_)
         residuals = scaled_data - reconstruction
         
@@ -208,7 +228,7 @@ def rolling_pca(df, window=125):
     loadings_history = pd.DataFrame(
         np.array(component_loadings).reshape(len(component_loadings), -1),
         index=pca_df.index,
-        columns=[f"loading_pc{pc+1}_{col}" for pc in range(3) for col in df.columns]
+        columns=[f"loading_{i}_{j}" for i in range(3) for j in range(len(df.columns))]
     )
     
     return pca_df, residuals_df, loadings_history
