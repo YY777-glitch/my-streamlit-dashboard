@@ -1,0 +1,3 @@
+streamlit
+matplotlib
+tvdatefeed==2.1.0
